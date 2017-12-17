@@ -25,14 +25,14 @@ class ArticleCrawler:
         CSS selector(s) used to determine next page that contain article links
         if this property equals None will be ignored
     number_of_articles : int
-        number of articles to crawl from `base_url`
+        number of articles to crawl from `base_url`, should be positive
     """
 
     def __init__(self, base_url=None, number_of_articles=20, article_link_css=None,
                  article_body_css=None, next_page_css=None, file_names_prefix=None,
-                 encode="utf-8"):
+                 create_dir=False, encode="utf-8"):
         """Summary
-
+        
         Parameters
         ----------
         base_url : None, optional
@@ -47,6 +47,9 @@ class ArticleCrawler:
             refer to class attributes
         file_names_prefix : None, optional
             refer to class attributes
+        create_dir : bool or str, optional
+            whether to put article files in a specified directory or not
+            directory will be created if it doesn't exist
         encode : str, optional
             refer to class attributes
         """
@@ -57,11 +60,19 @@ class ArticleCrawler:
         self.next_page_css = next_page_css
         self.file_names_prefix = file_names_prefix
         self.encode = encode
+        self.create_dir = create_dir
 
     def run(self):
         if not self._check_attributes():
             raise ValueError("some attribute values missing")
+        # single threaded
         internal_counter = 0
+        base_url = self.base_url  # URL to web page containing articles links
+        while internal_counter < self.number_of_articles:
+            articles_links = self._extract_article_links(base_url, self.article_link_css)
+            for link in articles_links:
+                self._extract_article_body(link, self.article_body_css)
+        
 
 
     def _check_attributes(self):
@@ -208,3 +219,11 @@ class ArticleCrawler:
 
         links = self._extract_elements(css_selectors, "", bs4_object)
         return links
+
+    def _extract_article_body(self, article_link, body_css):
+        print("ad")
+        temp_bs4 = bs4.BeautifulSoup(article_link,'html.parser')
+        print(temp_bs4["href"])
+        page_content, encode = self._get_url_contents(temp_bs4["href"])
+
+        page_content = str(page_content, encoding=encode)
