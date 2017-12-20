@@ -3,13 +3,76 @@
 import requests
 import bs4
 import sys
+import logging
+from more_itertools import chunked
+import threading
+
+
+def get_url_contents(link, method="GET", headers=None,
+                     params=None, proxy_config=None):
+    """Summary
+
+    Parameters
+    ----------
+    link : str
+        link to web page
+    method : str, optional
+        type of request, valid methods are: POST, GET, PUT, PATCH, and DELETE
+        if passed parameter not found in above list, GET will used
+        default is GET
+    headers : HTTP headers, optional
+        HTTP header fields
+    params : request parameters, optional
+        parameters used for request
+    proxy_config : dict
+        proxies argument value
+
+    Returns
+    -------
+    Tuple[bytes, str]
+        web-page as a bytes and its encode
+    """
+    valid_methods = {"POST", "GET", "PUT", "PATCH", "DELETE"}
+    if method not in valid_methods:
+        method = "GET"
+
+    if params is None:
+        pass
+    elif not isinstance(params, dict):
+        print("params is of type {}, it will omitted.".format(type(headers)))
+        params = None
+
+    if headers is None:
+        pass
+    elif not isinstance(headers, dict):
+        print("header is of type {}, it will omitted.".format(type(headers)))
+        headers = {}
+    # `headers` is dict
+    elif "User-Agent" not in headers:
+        headers["User-Agent"] = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 "
+        "Safari/537.36"
+
+    if proxy_config is None:
+        pass
+    elif not isinstance(proxy_config, dict):
+        print("proxy_config is of type {}, it will omitted.".format(
+            type(proxy_config)))
+        proxy_config = None
+
+    try:
+        result = requests.request(method, link, data=params,
+                                  headers=headers, proxies=proxy_config)
+        return result.content, result.encoding
+    except Exception as ex:
+        print(ex)
 
 
 class ArticleCrawler:
     """A class to crawl news from various sites
-    
+
     to start crawling you must initialize member variables, see `__init__` for more details
-    
+
     Attributes
     ----------
     article_body_css : list or str
@@ -26,6 +89,8 @@ class ArticleCrawler:
         files encoding
     file_names_prefix : str
         prefix files name 
+    multi_thread : TYPE
+        Description
     next_page_css : list or str
         CSS selector(s) used to determine next page that contain article links
         if this property equals None will be ignored
@@ -35,11 +100,12 @@ class ArticleCrawler:
         regular expression to extract website from `self.base_url`
     """
 
-    def __init__(self, base_url=None, number_of_articles=20, article_link_css=None,
-                 article_body_css=None, next_page_css=None, file_names_prefix=None,
-                 create_dir=False, encode="utf-8"):
+    def __init__(self, base_url=None, number_of_articles: int = 20,
+                 article_link_css=None, article_body_css=None,
+                 next_page_css=None, file_names_prefix=None,
+                 create_dir=False, encode="utf-8", multi_thread: bool = False):
         """Summary
-        
+
         Parameters
         ----------
         base_url : None, optional
@@ -59,48 +125,79 @@ class ArticleCrawler:
             directory will be created if it doesn't exist
         encode : str, optional
             refer to class attributes
+        multi_thread : bool, optional
+            Description
         """
         self.base_url = base_url
         self.number_of_articles = number_of_articles
         self.article_link_css = article_link_css
         self.article_body_css = article_body_css
         self.next_page_css = next_page_css
-        self.file_names_prefix = file_names_prefix if isinstance(file_names_prefix, str) else ''
+        self.file_names_prefix = file_names_prefix if isinstance(
+            file_names_prefix, str) else ''
         self.encode = encode
         self.create_dir = create_dir
+        self.multi_thread = multi_thread
         if isinstance(self.create_dir, str):
             self._create_output_dir()
         self.website_base_url_regexp = r'^(http(s)?:\/\/(www\.)?[a-z0-9]+\.(\w){2,3})'
 
     def run(self):
         """you should call this function to start crawling
-        
+
         Raises
         ------
         ValueError
             in case any missing or invalid values for parameters
         """
-        if not self._check_attributes():
+        if not self._check_attributes:
             raise ValueError("some attribute values missing")
-        # single threaded
+        if self.multi_thread:
+            self._multi_thread()
+        else:
+            self._run_single_thread()
+            # single threaded
+
+    def _run_single_thread(self):
+        """Summary
+        """
         internal_counter = 0
         base_url = self.base_url  # URL to web page containing articles links
+        max_tries = 0
         while True:
-            articles_links, bs4_object = self._extract_article_links(base_url)
-            bodies = []
-            for link in articles_links:
-                temp = self._extract_article_body(link)
-                internal_counter = internal_counter + 1
-                self._save_to_file(temp, internal_counter)
-                if internal_counter > self.number_of_articles:
+            try:
+                articles_links, bs4_object = self._extract_article_links(
+                    base_url)
+                max_tries = 0
+            except Exception as ex:
+                logging.exception(ex, exc_info=True)
+                max_tries = max_tries + 1
+                if max_tries > 3:
+                    logging.warning(f'exiting  after {max_tries} tries.')
                     break
+                continue
+            for link in articles_links:
+                try:
+                    temp = self._extract_article_body(link)
+                    internal_counter = internal_counter + 1
+                    self._save_to_file(temp, internal_counter)
+                    if internal_counter > self.number_of_articles:
+                        break
+                    elif internal_counter % 500 == 0:
+                        logging.info(
+                            'stored files : {}.'.format(internal_counter))
+                except Exception as ex:
+                    print(ex)
+                    logging.exception(ex, exc_info=True)
+                    continue
 
             if internal_counter >= self.number_of_articles:
                 break
 
             # get next link
             base_url = self._extract_elements(self.next_page_css,
-                                              bs4_object=bs4_object, attributes=['href'])[0]
+                                              bs4_object=bs4_object,
+                                              attributes=['href'])[0]
             if base_url[0] == '/':
                 import re
                 pattern = re.compile(self.website_base_url_regexp)
@@ -109,9 +206,83 @@ class ArticleCrawler:
                 # check for urls now
                 base_url = aux_url + base_url
 
+    def _multi_thread(self):
+        """Summary
+        """
+        internal_counter = 0
+        base_url = self.base_url  # URL to web page containing articles links
+        max_tries = 0
+        while True:
+            try:
+                articles_links, bs4_object = self._extract_article_links(
+                    base_url)
+                max_tries = 0
+            except Exception as ex:
+                logging.exception(ex, exc_info=True)
+                max_tries = max_tries + 1
+                if max_tries > 3:
+                    logging.warning(f'exiting  after {max_tries} tries.')
+                    break
+                continue
+            bodies = []
+            chucked_list = chunked(articles_links, 4)
+            threads = []
+            lock_obj = threading.Lock()
+            for chunk in chucked_list:
+                threads.append(
+                    threading.Thread(
+                        target=self._mt_helper,
+                        args=(chunk, bodies, lock_obj)
+                    )
+                )
+                threads[-1].start()
+
+            for th in threads:
+                th.join()
+
+            for body in bodies:
+                try:
+                    self._save_to_file(body, internal_counter)
+                    internal_counter = internal_counter + 1
+                    if internal_counter > self.number_of_articles:
+                        break
+                    elif internal_counter % 500 == 0:
+                        print(
+                            'stored files : {}.'.format(internal_counter))
+                except Exception as ex:
+                    logging.exception(ex, exc_info=True)
+                    continue
+
+            if internal_counter >= self.number_of_articles:
+                break
+
+            # get next link
+            base_url = self._extract_elements(self.next_page_css,
+                                              bs4_object=bs4_object,
+                                              attributes=['href'])[0]
+            if base_url[0] == '/':
+                import re
+                pattern = re.compile(self.website_base_url_regexp)
+                match_obj = re.match(pattern=pattern, string=self.base_url)
+                aux_url = match_obj.group()
+                # check for urls now
+                base_url = aux_url + base_url
+
+    def _mt_helper(self, links: list, bodies: list, lock: threading.Lock):
+        for link in links:
+            try:
+                lock.acquire()
+                bodies.append(self._extract_article_body(link))
+                lock.release()
+            except Exception as ex:
+                logging.exception(ex, exc_info=True)
+
+        logging.debug('thread ended execute')
+
+    @property
     def _check_attributes(self):
         """Summary
-        
+
         Returns
         -------
         bool
@@ -119,68 +290,12 @@ class ArticleCrawler:
         """
         return True
 
-    def _get_url_contents(self, link, method="GET", headers=None,
-                          params=None, proxy_config=None):
+    def _extract_elements(self, css_selectors,
+                          html_doc="",
+                          bs4_object=None,
+                          attributes=None):
         """Summary
-        
-        Parameters
-        ----------
-        link : str
-            link to web page
-        method : str, optional
-            type of request, valid methods are: POST, GET, PUT, PATCH, and DELETE
-            if passed parameter not found in above list, GET will used
-            default is GET
-        headers : HTTP headers, optional
-            HTTP header fields
-        params : request parameters, optional
-            parameters used for request
-        proxy_config : dict
-            proxies argument value
-        
-        Returns
-        -------
-        Tuple[bytes, str]
-            web-page as a bytes and its encode
-        """
-        valid_methods = {"POST", "GET", "PUT", "PATCH", "DELETE"}
-        if method not in valid_methods:
-            method = "GET"
 
-        if params is None:
-            pass
-        elif not isinstance(params, dict):
-            print("params is of type {}, it will omitted.".format(type(headers)))
-            params = None
-
-        if headers is None:
-            pass
-        elif not isinstance(headers, dict):
-            print("header is of type {}, it will omitted.".format(type(headers)))
-            headers = {}
-        # `headers` is dict
-        elif "User-Agent" not in headers:
-            headers["User-Agent"] = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 "
-            "Safari/537.36"
-
-        if proxy_config is None:
-            pass
-        elif not isinstance(proxy_config, dict):
-            print("proxy_config is of type {}, it will omitted.".format(
-                type(proxy_config)))
-            proxy_config = None
-
-        try:
-            result = requests.request(method, link, data=params,
-                                      headers=headers, proxies=proxy_config)
-            return result.content, result.encoding
-        except Exception as ex:
-            print(ex)
-
-    def _extract_elements(self, css_selectors, html_doc="", bs4_object=None, attributes=None):
-        """Summary
-        
         Parameters
         ----------
         css_selectors : TYPE
@@ -191,12 +306,12 @@ class ArticleCrawler:
             Description
         attributes : list, optional
             if provided value of this attributes will returned
-        
+
         Raises
         ------
         TypeError
             Description
-        
+
         Returns
         -------
         list
@@ -206,29 +321,37 @@ class ArticleCrawler:
             css_selectors = [css_selectors]
         elif isinstance(css_selectors, list):
             pass
-        else:
-            tb = sys.exc_info()[2]
-            raise TypeError(
-                "css_selector must be either str or list of str").with_traceback(tb)
 
-        if isinstance(bs4_object, bs4.BeautifulSoup):
-            return self._extract_elements_from_bs4_object(css_selectors=css_selectors,
-                                                          bs4_object=bs4_object,
-                                                          attributes=attributes)
-        # check for html_doc
-        elif isinstance(html_doc, str) and not html_doc == "":
-            return self._extract_elements_from_str(css_selectors, html_doc, attributes)
         else:
             tb = sys.exc_info()[2]
             raise TypeError(
-                "html_doc must be either str or pass a bs4.BeautifulSoup object"
+                "css_selector must be either str or list of str"
             ).with_traceback(tb)
 
-    def _extract_elements_from_bs4_object(self, css_selectors: list,
-                                          bs4_object: bs4.BeautifulSoup,
-                                          attributes=None):
+        if isinstance(bs4_object, bs4.BeautifulSoup):
+            return self._extract_elements_from_bs4(css_selectors=css_selectors,
+                                                   bs4_object=bs4_object,
+                                                   attributes=attributes
+                                                   )
+        # check for html_doc
+        elif isinstance(html_doc, str) and not html_doc == "":
+            return self._extract_elements_from_str(css_selectors,
+                                                   html_doc,
+                                                   attributes
+                                                   )
+        else:
+            tb = sys.exc_info()[2]
+            raise TypeError(
+                "html_doc must be either str or pass a "
+                "bs4.BeautifulSoup object"
+            ).with_traceback(tb)
+
+    @staticmethod
+    def _extract_elements_from_bs4(css_selectors: list,
+                                   bs4_object: bs4.BeautifulSoup,
+                                   attributes=None):
         """Summary
-        
+
         Parameters
         ----------
         css_selectors : list
@@ -237,12 +360,12 @@ class ArticleCrawler:
             bs4 object used to search
         attributes : None, optional
             Description
-        
+
         Returns
         -------
         TYPE
             Description
-        
+
         Raises
         ------
         TypeError
@@ -267,7 +390,7 @@ class ArticleCrawler:
     def _extract_elements_from_str(self, css_selectors: list,
                                    html_doc: str, attributes):
         """Summary
-        
+
         Parameters
         ----------
         css_selectors : list
@@ -276,39 +399,41 @@ class ArticleCrawler:
             Description
         attributes : TYPE
             Description
-        
+
         Returns
         -------
         TYPE
             Description
         """
         bs4_object = bs4.BeautifulSoup(html_doc, 'html.parser')
-        return self._extract_elements_from_bs4_object(css_selectors=css_selectors, bs4_object=bs4_object,
-                                                      attributes=attributes)
+        return self._extract_elements_from_bs4(css_selectors=css_selectors,
+                                               bs4_object=bs4_object,
+                                               attributes=attributes)
 
     def _extract_article_links(self, url):
         """Summary
-        
+
         Parameters
         ----------
         url : TYPE
             Description
-        
+
         Returns
         -------
         TYPE
             Description
-        
+
         Deleted Parameters
         ------------------
         css_selectors : TYPE
             Description
         """
-        html_doc, encode = self._get_url_contents(url)
+        html_doc, encode = get_url_contents(url)
         data = str(html_doc, encoding=encode)
         bs4_object = bs4.BeautifulSoup(html_doc, 'html.parser')
 
-        links = self._extract_elements(self.article_link_css, bs4_object=bs4_object, attributes=['href'])
+        links = self._extract_elements(
+            self.article_link_css, bs4_object=bs4_object, attributes=['href'])
         import re
         pattern = re.compile(self.website_base_url_regexp)
         match_obj = re.match(pattern=pattern, string=self.base_url)
@@ -323,26 +448,27 @@ class ArticleCrawler:
 
     def _extract_article_body(self, article_link):
         """Summary
-        
+
         Parameters
         ----------
         article_link : TYPE
             Description
-        
+
         Deleted Parameters
         ------------------
         body_css : TYPE
             Description
-        
+
         Returns
         -------
         TYPE
             Description
         """
-        page_content, encode = self._get_url_contents(article_link)
+        page_content, encode = get_url_contents(article_link)
         page_content = str(page_content, encoding=encode)
         page_content = bs4.BeautifulSoup(page_content, 'html.parser')
-        page_content = self._extract_elements(self.article_body_css, bs4_object=page_content)
+        page_content = self._extract_elements(
+            self.article_body_css, bs4_object=page_content)
         ret = ''
         for item in page_content:
             ret = ret + item.get_text()
@@ -350,7 +476,7 @@ class ArticleCrawler:
 
     def _save_to_file(self, content, number):
         """Summary
-        
+
         Parameters
         ----------
         content : TYPE
@@ -365,7 +491,7 @@ class ArticleCrawler:
             base_dir = self.file_names_prefix
 
         file_name = f'{base_dir}_{number:0{pad_len}}.txt'
-        print(file_name)
+        # print(file_name)
         with open(file_name, mode='w+',
                   encoding=self.encode) as f:
             f.write(content)
@@ -376,3 +502,14 @@ class ArticleCrawler:
         import os
         if not os.path.exists(self.create_dir):
             os.mkdir(self.create_dir)
+
+    def dump(self):
+        # TODO: add dump option
+        import pandas as pd
+        dt = pd.Series()
+        dt['multi_thread'] = self.multi_thread
+        dt['multi_thread'] = self.multi_thread
+        dt['multi_thread'] = self.multi_thread
+        dt['multi_thread'] = self.multi_thread
+        dt['multi_thread'] = self.multi_thread
+        dt['multi_thread'] = self.multi_thread
