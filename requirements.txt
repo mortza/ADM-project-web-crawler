@@ -1,2 +1,4 @@
 beautifulsoup4 >= 4.6
 more_itertools >= 4.*
+pandas >= 0.20.*
+grequests >= 0.3.*

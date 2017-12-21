@@ -3,7 +3,7 @@ import logging
 
 logging.basicConfig(filename='log.txt',
                     filemode='w+',
-                    format='%(asctime)s : %(levelname)s : %(message)s',
+                    format='%(asctime)s : %(levelname)s : %(message)s\n\n',
                     level=logging.INFO)
 
 article_crawler = ArticleCrawler(create_dir='yjc_ir_social')
@@ -15,4 +15,5 @@ article_crawler.base_url = 'http://www.yjc.ir/fa/social'
 article_crawler.number_of_articles = 10000
 article_crawler.file_names_prefix = 'social'
 article_crawler.multi_thread = True
+# article_crawler.create_from_dump('ArticleCrawler.json')
 article_crawler.run()

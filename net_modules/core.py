@@ -6,12 +6,13 @@ import sys
 import logging
 from more_itertools import chunked
 import threading
+import grequests
 
 
 def get_url_contents(link, method="GET", headers=None,
                      params=None, proxy_config=None):
     """Summary
-
+    
     Parameters
     ----------
     link : str
@@ -26,7 +27,7 @@ def get_url_contents(link, method="GET", headers=None,
         parameters used for request
     proxy_config : dict
         proxies argument value
-
+    
     Returns
     -------
     Tuple[bytes, str]
@@ -70,9 +71,10 @@ def get_url_contents(link, method="GET", headers=None,
 
 class ArticleCrawler:
     """A class to crawl news from various sites
+    
 
     to start crawling you must initialize member variables, see `__init__` for more details
-
+    
     Attributes
     ----------
     article_body_css : list or str
@@ -80,17 +82,21 @@ class ArticleCrawler:
         aggregate inner text of matching elements
     article_link_css : list or str
         CSS selector(s) used to find articles link (direct link to this)
-        TODO : some modifications needed
     base_url : str
         base url of website that contains article
-    create_dir : TYPE
-        Description
+    create_dir : str or bool
+        if passed str a directory with same name created and all file will put on it
+        it is recommended to pass existing directory
+    current_page_url : str
+        URL to web page containing articles links
     encode : str
         files encoding
     file_names_prefix : str
         prefix files name 
-    multi_thread : TYPE
+    internal_counter : int
         Description
+    multi_thread : bool
+        sun on single thread or multiple threads
     next_page_css : list or str
         CSS selector(s) used to determine next page that contain article links
         if this property equals None will be ignored
@@ -105,7 +111,7 @@ class ArticleCrawler:
                  next_page_css=None, file_names_prefix=None,
                  create_dir=False, encode="utf-8", multi_thread: bool = False):
         """Summary
-
+        
         Parameters
         ----------
         base_url : None, optional
@@ -129,6 +135,7 @@ class ArticleCrawler:
             Description
         """
         self.base_url = base_url
+        self.current_page_url = self.base_url
         self.number_of_articles = number_of_articles
         self.article_link_css = article_link_css
         self.article_body_css = article_body_css
@@ -141,16 +148,17 @@ class ArticleCrawler:
         if isinstance(self.create_dir, str):
             self._create_output_dir()
         self.website_base_url_regexp = r'^(http(s)?:\/\/(www\.)?[a-z0-9]+\.(\w){2,3})'
+        self.internal_counter = 1
 
     def run(self):
         """you should call this function to start crawling
-
+        
         Raises
         ------
         ValueError
             in case any missing or invalid values for parameters
         """
-        if not self._check_attributes:
+        if not self._check_attributes():
             raise ValueError("some attribute values missing")
         if self.multi_thread:
             self._multi_thread()
@@ -161,71 +169,52 @@ class ArticleCrawler:
     def _run_single_thread(self):
         """Summary
         """
-        internal_counter = 0
-        base_url = self.base_url  # URL to web page containing articles links
-        max_tries = 0
         while True:
-            try:
-                articles_links, bs4_object = self._extract_article_links(
-                    base_url)
-                max_tries = 0
-            except Exception as ex:
-                logging.exception(ex, exc_info=True)
-                max_tries = max_tries + 1
-                if max_tries > 3:
-                    logging.warning(f'exiting  after {max_tries} tries.')
-                    break
-                continue
+            articles_links, bs4_object = \
+                self._extract_article_links(self.current_page_url)
+
             for link in articles_links:
+                if self.internal_counter > self.number_of_articles:
+                    break
                 try:
                     temp = self._extract_article_body(link)
-                    internal_counter = internal_counter + 1
-                    self._save_to_file(temp, internal_counter)
-                    if internal_counter > self.number_of_articles:
-                        break
-                    elif internal_counter % 500 == 0:
+                    self.internal_counter = self.internal_counter + 1
+                    self._save_to_file(temp)
+
+                    if self.internal_counter % 500 == 0:
                         logging.info(
-                            'stored files : {}.'.format(internal_counter))
+                            'stored files : {}.'.format(self.internal_counter))
                 except Exception as ex:
-                    print(ex)
-                    logging.exception(ex, exc_info=True)
+                    self._exception_handler(ex)
                     continue
-
-            if internal_counter >= self.number_of_articles:
+            if self.internal_counter >= self.number_of_articles:
                 break
-
             # get next link
-            base_url = self._extract_elements(self.next_page_css,
-                                              bs4_object=bs4_object,
-                                              attributes=['href'])[0]
-            if base_url[0] == '/':
+            self.current_page_url = \
+                self._extract_elements(self.next_page_css,
+                                       bs4_object=bs4_object,
+                                       attributes=['href'])[0]
+            if self.current_page_url[0] == '/':
                 import re
                 pattern = re.compile(self.website_base_url_regexp)
                 match_obj = re.match(pattern=pattern, string=self.base_url)
                 aux_url = match_obj.group()
                 # check for urls now
-                base_url = aux_url + base_url
+                self.current_page_url = aux_url + self.current_page_url
 
     def _multi_thread(self):
-        """Summary
         """
-        internal_counter = 0
-        base_url = self.base_url  # URL to web page containing articles links
-        max_tries = 0
+        """
         while True:
-            try:
-                articles_links, bs4_object = self._extract_article_links(
-                    base_url)
-                max_tries = 0
-            except Exception as ex:
-                logging.exception(ex, exc_info=True)
-                max_tries = max_tries + 1
-                if max_tries > 3:
-                    logging.warning(f'exiting  after {max_tries} tries.')
-                    break
-                continue
+            articles_links, bs4_object = \
+                self._extract_article_links(self.current_page_url)
+            urls = (grequests.get(link) for link in articles_links)
+
             bodies = []
-            chucked_list = chunked(articles_links, 4)
+            for body in grequests.map(urls):
+                bodies.append(str(body.content, encoding=body.encoding))
+            chucked_list = chunked(bodies, 3)
+            bodies = []
             threads = []
             lock_obj = threading.Lock()
             for chunk in chucked_list:
@@ -236,50 +225,56 @@ class ArticleCrawler:
                     )
                 )
                 threads[-1].start()
-
             for th in threads:
-                th.join()
+                th.join()  # busy wait
 
             for body in bodies:
-                try:
-                    self._save_to_file(body, internal_counter)
-                    internal_counter = internal_counter + 1
-                    if internal_counter > self.number_of_articles:
-                        break
-                    elif internal_counter % 500 == 0:
-                        print(
-                            'stored files : {}.'.format(internal_counter))
-                except Exception as ex:
-                    logging.exception(ex, exc_info=True)
-                    continue
+                self._save_to_file(body)
+                self.internal_counter = self.internal_counter + 1
+                if self.internal_counter > self.number_of_articles:
+                    break
+                elif self.internal_counter % 500 == 0:
+                    logging.info(
+                        'stored files : {}.'.format(self.internal_counter))
 
-            if internal_counter >= self.number_of_articles:
+            if self.internal_counter >= self.number_of_articles:
                 break
-
             # get next link
-            base_url = self._extract_elements(self.next_page_css,
-                                              bs4_object=bs4_object,
-                                              attributes=['href'])[0]
-            if base_url[0] == '/':
+            self.current_page_url = \
+                self._extract_elements(self.next_page_css,
+                                       bs4_object=bs4_object,
+                                       attributes=['href'])[0]
+            if self.current_page_url[0] == '/':
                 import re
                 pattern = re.compile(self.website_base_url_regexp)
                 match_obj = re.match(pattern=pattern, string=self.base_url)
                 aux_url = match_obj.group()
                 # check for urls now
-                base_url = aux_url + base_url
+                self.current_page_url = aux_url + self.current_page_url
 
     def _mt_helper(self, links: list, bodies: list, lock: threading.Lock):
+        """Summary
+
+        Parameters
+        ----------
+        links : list
+            Description
+        bodies : list
+            Description
+        lock : threading.Lock
+            Description
+        """
         for link in links:
             try:
                 lock.acquire()
                 bodies.append(self._extract_article_body(link))
                 lock.release()
             except Exception as ex:
-                logging.exception(ex, exc_info=True)
-
+                lock.acquire()
+                self._exception_handler(ex)
+                lock.release()
         logging.debug('thread ended execute')
 
-    @property
     def _check_attributes(self):
         """Summary
 
@@ -288,6 +283,53 @@ class ArticleCrawler:
         bool
             Description
         """
+        # article_body_css
+        if isinstance(self.article_body_css, list) or isinstance(self.article_body_css, str):
+            pass
+        else:
+            raise ValueError('article_body_css must be either str or list')
+        # article_link_css
+        if isinstance(self.article_link_css, list) or isinstance(self.article_link_css, str):
+            pass
+        else:
+            raise ValueError('article_link_css must be either str or list')
+        # base_url
+        if isinstance(self.base_url, str):
+            self.current_page_url = self.base_url
+            pass
+        else:
+            raise ValueError('article_link_css must be either str')
+        # create_dir
+        if isinstance(self.create_dir, str) or isinstance(self.create_dir, bool):
+            pass
+        else:
+            raise ValueError('create_dir must be str or bool')
+        # encode
+        if isinstance(self.encode, str):
+            pass
+        else:
+            raise ValueError('encode must be str')
+        # file_names_prefix
+        if isinstance(self.file_names_prefix, str) or self.file_names_prefix is None:
+            pass
+        else:
+            raise ValueError('file_name_prefix must be either str or None')
+        # multi_thread
+        if isinstance(self.multi_thread, bool):
+            pass
+        else:
+            raise ValueError('multi_thread must be bool')
+        # next_page_css
+        if isinstance(self.next_page_css, list) or isinstance(self.next_page_css, str):
+            pass
+        else:
+            raise ValueError('next_page_css must be either str or list')
+        # number_of_articles
+        if isinstance(self.number_of_articles, int):
+            pass
+        else:
+            raise ValueError('number_of_articles must be int')
+
         return True
 
     def _extract_elements(self, css_selectors,
@@ -428,23 +470,26 @@ class ArticleCrawler:
         css_selectors : TYPE
             Description
         """
-        html_doc, encode = get_url_contents(url)
-        data = str(html_doc, encoding=encode)
-        bs4_object = bs4.BeautifulSoup(html_doc, 'html.parser')
+        try:
+            html_doc, encode = get_url_contents(url)
+            bs4_object = bs4.BeautifulSoup(html_doc, 'html.parser')
 
-        links = self._extract_elements(
-            self.article_link_css, bs4_object=bs4_object, attributes=['href'])
-        import re
-        pattern = re.compile(self.website_base_url_regexp)
-        match_obj = re.match(pattern=pattern, string=self.base_url)
-        aux_url = match_obj.group()
-        # check for urls now
+            links = self._extract_elements(
+                self.article_link_css, bs4_object=bs4_object, attributes=['href'])
+            import re
+            pattern = re.compile(self.website_base_url_regexp)
+            match_obj = re.match(pattern=pattern, string=self.base_url)
+            aux_url = match_obj.group()
+            # check for urls now
 
-        for (i, link) in enumerate(links):
-            # if link is relative(!) modify it!
-            if link[0] == '/':  # dummy check for now
-                links[i] = aux_url + links[i]
-        return links, bs4_object
+            for (i, link) in enumerate(links):
+                # if link is relative(!) modify it!
+                if link[0] == '/':  # dummy check for now
+                    links[i] = aux_url + links[i]
+            return links, bs4_object
+        except Exception as ex:
+            self._exception_handler(ex)
+            return []
 
     def _extract_article_body(self, article_link):
         """Summary
@@ -464,8 +509,11 @@ class ArticleCrawler:
         TYPE
             Description
         """
-        page_content, encode = get_url_contents(article_link)
-        page_content = str(page_content, encoding=encode)
+        if not self.multi_thread:
+            page_content, encode = get_url_contents(article_link)
+            page_content = str(page_content, encoding=encode)
+        else:
+            page_content = article_link
         page_content = bs4.BeautifulSoup(page_content, 'html.parser')
         page_content = self._extract_elements(
             self.article_body_css, bs4_object=page_content)
@@ -474,13 +522,16 @@ class ArticleCrawler:
             ret = ret + item.get_text()
         return ret
 
-    def _save_to_file(self, content, number):
+    def _save_to_file(self, content):
         """Summary
 
         Parameters
         ----------
         content : TYPE
             Description
+
+        Deleted Parameters
+        ------------------
         number : TYPE
             Description
         """
@@ -490,7 +541,7 @@ class ArticleCrawler:
         else:
             base_dir = self.file_names_prefix
 
-        file_name = f'{base_dir}_{number:0{pad_len}}.txt'
+        file_name = f'{base_dir}_{self.internal_counter:0{pad_len}}.txt'
         # print(file_name)
         with open(file_name, mode='w+',
                   encoding=self.encode) as f:
@@ -504,12 +555,55 @@ class ArticleCrawler:
             os.mkdir(self.create_dir)
 
     def dump(self):
-        # TODO: add dump option
+        """dump attributes on disk
+        """
         import pandas as pd
         dt = pd.Series()
         dt['multi_thread'] = self.multi_thread
-        dt['multi_thread'] = self.multi_thread
-        dt['multi_thread'] = self.multi_thread
-        dt['multi_thread'] = self.multi_thread
-        dt['multi_thread'] = self.multi_thread
-        dt['multi_thread'] = self.multi_thread
+        dt['article_body_css'] = self.article_body_css
+        dt['article_link_css'] = self.article_link_css
+        dt['base_url'] = self.base_url
+        dt['create_dir'] = self.create_dir
+        dt['next_page_css'] = self.next_page_css
+        dt['encode'] = self.encode
+        dt['file_names_prefix'] = self.file_names_prefix
+        dt['website_base_url_regexp'] = self.website_base_url_regexp
+        dt['current_page_url'] = self.current_page_url
+        dt['internal_counter'] = self.internal_counter
+        dt['number_of_articles'] = self.number_of_articles
+        # storing on json file
+        dt.to_json('ArticleCrawler.json')
+
+    def create_from_dump(self, json_dump='ArticleCrawler.json'):
+        """restore attributes from disk
+
+        Parameters
+        ----------
+        json_dump : str, optional
+            file name or path to file that contains dump file, must be json
+        """
+        import pandas as pd
+        dt = pd.read_json(json_dump, orient='records', typ='series')
+        self.multi_thread = dt['multi_thread']
+        self.article_body_css = dt['article_body_css']
+        self.article_link_css = dt['article_link_css']
+        self.base_url = dt['base_url']
+        self.create_dir = dt['create_dir']
+        self.next_page_css = dt['next_page_css']
+        self.encode = dt['encode']
+        self.file_names_prefix = dt['file_names_prefix']
+        self.website_base_url_regexp = dt['website_base_url_regexp']
+        self.current_page_url = dt['current_page_url']
+        self.internal_counter = dt['internal_counter']
+        self.number_of_articles = dt['number_of_articles']
+
+    def _exception_handler(self, exception: Exception):
+        """Summary
+
+        Parameters
+        ----------
+        exception : Exception
+            Description
+        """
+        logging.exception(exception, exc_info=True)
+        self.dump()

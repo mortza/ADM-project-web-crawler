@@ -1,3 +1,5 @@
+log.txt
+get_url_contents.json
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
